@@ -1,0 +1,3 @@
+This is GCC's private customize/enhancement patches collection.
+Main targets are i686-pc-cygwin, amd64-w64-mingw32, amd64-*-linux-gnu and h8300-elf.
+I use C++ only, not pure C nor Objective-C etc.
