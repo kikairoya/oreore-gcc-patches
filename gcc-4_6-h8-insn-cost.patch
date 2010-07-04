@@ -1,0 +1,86 @@
+diff --git a/gcc/combine.c b/gcc/combine.c
+index d3305cb..76fb739 100644
+--- a/gcc/combine.c
++++ b/gcc/combine.c
+@@ -5074,7 +5074,7 @@ combine_simplify_rtx (rtx x, enum machine_mode op0_mode, int in_dest)
+       /* Don't change the mode of the MEM if that would change the meaning
+ 	 of the address.  */
+       if (MEM_P (SUBREG_REG (x))
+-	  && (MEM_VOLATILE_P (SUBREG_REG (x))
++	  && ((! volatile_ok && MEM_VOLATILE_P (SUBREG_REG (x)))
+ 	      || mode_dependent_address_p (XEXP (SUBREG_REG (x), 0))))
+ 	return gen_rtx_CLOBBER (mode, const0_rtx);
+ 
+diff --git a/gcc/config/h8300/h8300.c b/gcc/config/h8300/h8300.c
+index 5773fb1..def79a1 100644
+--- a/gcc/config/h8300/h8300.c
++++ b/gcc/config/h8300/h8300.c
+@@ -1245,6 +1245,10 @@ h8300_rtx_costs (rtx x, int code, int outer_code, int *total, bool speed)
+ 	      }
+ 	  }
+ 	*total = 1;
++	if (outer_code == MEM && h8300_eightbit_constant_address_p (x))
++	  *total = 0;
++	if (outer_code == AND && exact_log2 (n))
++	  *total = 0;
+ 	return true;
+       }
+ 
+@@ -1258,6 +1262,8 @@ h8300_rtx_costs (rtx x, int code, int outer_code, int *total, bool speed)
+ 	  return true;
+ 	}
+       *total = 3;
++      if (outer_code == MEM && h8300_eightbit_constant_address_p (x))
++	*total = 0;
+       return true;
+ 
+     case CONST_DOUBLE:
+@@ -5917,4 +5923,7 @@ h8300_trampoline_init (rtx m_tramp, tree fndecl, rtx cxt)
+ #undef TARGET_TRAMPOLINE_INIT
+ #define TARGET_TRAMPOLINE_INIT h8300_trampoline_init
+ 
++#undef TARGET_NARROW_VOLATILE_BITFIELD
++#define TARGET_NARROW_VOLATILE_BITFIELD hook_bool_void_true
++
+ struct gcc_target targetm = TARGET_INITIALIZER;
+diff --git a/gcc/config/h8300/predicates.md b/gcc/config/h8300/predicates.md
+index c4ea2d8..8856a7e 100644
+--- a/gcc/config/h8300/predicates.md
++++ b/gcc/config/h8300/predicates.md
+@@ -27,7 +27,7 @@
+       && GET_CODE (op) == MEM
+       && GET_CODE (XEXP (op, 0)) == POST_INC)
+     return 1;
+-  return general_operand (op, mode);
++  return bit_operand (op, mode) || general_operand (op, mode);
+ })
+ 
+ ;; Return true if OP is a valid destination operand for an integer
+@@ -40,7 +40,7 @@
+       && GET_CODE (op) == MEM
+       && GET_CODE (XEXP (op, 0)) == PRE_DEC)
+     return 1;
+-  return general_operand (op, mode);
++  return bit_operand (op, mode) || general_operand (op, mode);
+ })
+ 
+ ;; Likewise the second operand.
+@@ -324,10 +324,16 @@
+ (define_predicate "bit_operand"
+   (match_code "reg,subreg,mem")
+ {
++  const int save_volatile_ok = volatile_ok;
++  volatile_ok = 1;
+   /* We can accept any nonimmediate operand, except that MEM operands must
+      be limited to those that use addresses valid for the 'U' constraint.  */
+-  if (!nonimmediate_operand (op, mode) && !OK_FOR_U (op))
+-    return 0;
++  {
++    int imm_and_not_u = (!nonimmediate_operand (op, mode) && !OK_FOR_U (op));
++    volatile_ok = save_volatile_ok;
++    if (imm_and_not_u)
++      return 0;
++  }
+ 
+   /* H8SX accepts pretty much anything here.  */
+   if (TARGET_H8300SX)
