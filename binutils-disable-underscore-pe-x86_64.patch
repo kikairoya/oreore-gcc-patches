@@ -1,0 +1,87 @@
+diff --git a/bfd/pe-x86_64.c b/bfd/pe-x86_64.c
+old mode 100644
+new mode 100755
+index bcf18b6..495155a
+--- a/bfd/pe-x86_64.c
++++ b/bfd/pe-x86_64.c
+@@ -28,7 +28,6 @@
+ #define COFF_WITH_PE
+ #define COFF_WITH_pex64
+ #define PCRELOFFSET 		TRUE
+-#define TARGET_UNDERSCORE 	'_'
+ #define COFF_LONG_SECTION_NAMES
+ #define COFF_SUPPORT_GNU_LINKONCE
+ #define COFF_LONG_FILENAMES
+diff --git a/bfd/pei-x86_64.c b/bfd/pei-x86_64.c
+old mode 100644
+new mode 100755
+index f5b8abd..ea4c32c
+--- a/bfd/pei-x86_64.c
++++ b/bfd/pei-x86_64.c
+@@ -29,7 +29,6 @@
+ #define COFF_WITH_PE
+ #define COFF_WITH_pex64
+ #define PCRELOFFSET 		TRUE
+-#define TARGET_UNDERSCORE 	'_'
+ /* Long section names not allowed in executable images, only object files.  */
+ #define COFF_LONG_SECTION_NAMES 0
+ #define COFF_SUPPORT_GNU_LINKONCE
+diff --git a/binutils/dlltool.c b/binutils/dlltool.c
+index 897790d..b1dd709 100755
+--- a/binutils/dlltool.c
++++ b/binutils/dlltool.c
+@@ -932,7 +932,7 @@ asm_prefix (int machine, const char *name)
+     case M386:
+     case MX86:
+       /* Symbol names starting with ? do not have a leading underscore. */
+-      if (name && *name == '?')
++      if (create_for_pep || (name && *name == '?'))
+         break;
+       else
+         return "_";
+diff --git a/ld/emulparams/i386pep.sh b/ld/emulparams/i386pep.sh
+index 7145f35..d3d03e5 100755
+--- a/ld/emulparams/i386pep.sh
++++ b/ld/emulparams/i386pep.sh
+@@ -5,6 +5,6 @@ RELOCATEABLE_OUTPUT_FORMAT="pe-x86-64"
+ TEMPLATE_NAME=pep
+ ENTRY="_mainCRTStartup"
+ SUBSYSTEM=PE_DEF_SUBSYSTEM
+-INITIAL_SYMBOL_CHAR=\"_\"
++INITIAL_SYMBOL_CHAR=\"\"
+ TARGET_PAGE_SIZE=0x1000
+ GENERATE_AUTO_IMPORT_SCRIPT=1
+diff --git a/ld/pe-dll.c b/ld/pe-dll.c
+old mode 100644
+new mode 100755
+index 54021b6..1720e44
+--- a/ld/pe-dll.c
++++ b/ld/pe-dll.c
+@@ -250,14 +250,17 @@ static const pe_details_type pe_detail_list[] =
+     "pei-x86-64",
+     "pe-x86-64",
+     3 /* R_IMAGEBASE */,
++    PE_ARCH_i386,
++    bfd_arch_i386,
++    FALSE,
+ #else
+     "pei-i386",
+     "pe-i386",
+     7 /* R_IMAGEBASE */,
+-#endif
+     PE_ARCH_i386,
+     bfd_arch_i386,
+     TRUE,
++#endif
+     autofilter_symbollist_i386
+   },
+   {
+@@ -730,7 +733,7 @@ process_def_file_and_drectve (bfd *abfd ATTRIBUTE_UNUSED, struct bfd_link_info *
+ 		  if (auto_export (b, pe_def_file, sn))
+ 		    {
+ 		      def_file_export *p;
+-		      p=def_file_add_export (pe_def_file, sn, 0, -1);
++		      p = def_file_add_export (pe_def_file, sn, 0, -1);
+ 		      /* Fill data flag properly, from dlltool.c.  */
+ 		      p->flag_data = !(symbols[j]->flags & BSF_FUNCTION);
+ 		    }
