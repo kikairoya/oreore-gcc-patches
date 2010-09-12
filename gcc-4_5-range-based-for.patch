@@ -1,0 +1,1056 @@
+diff --git a/gcc/cp/ChangeLog b/gcc/cp/ChangeLog
+index 5be58a4..fce00c4 100644
+--- a/gcc/cp/ChangeLog
++++ b/gcc/cp/ChangeLog
+@@ -1,3 +1,31 @@
++2010-09-11  Rodrigo Rivas <rodrigorivascosta@gmail.com>
++
++	Implement range-based for-statements.
++	* cp-tree.def (RANGE_FOR_STMT): New.
++	* cp-tree.h (RANGE_FOR_DECL, RANGE_FOR_EXPR, RANGE_FOR_BODY): New.
++	(cp_convert_range_for): Declare.
++	* pt.c (tsubst_expr): Add RANGE_FOR_STMT.
++	(tsubst_copy_and_build): perform_koenig_lookup takes extra argument.
++	* semantics.c (begin_range_for_stmt): New.
++	(finish_range_for_decl): New.
++	(finish_for_stmt): Accept also RANGE_FOR_STMT.
++	(perform_koenig_lookup): Add extra argument include_std.
++	* parser.c (cp_parser_c_for): New with code from
++	cp_parser_iteration_statement().
++	(cp_parser_range_for): New.
++	(cp_convert_range_for): New.
++	(cp_parser_iteration_statement): Add range-for support.
++	(cp_parser_condition): Adjust comment.
++	(cp_parser_postfix_expression): perform_koenig_lookup takes extra
++	argument.
++	* dump.c (cp_dump_tree): Add RANGE_FOR_STMT.
++	* cxx-pretty-print.c: Likewise.
++	* lex.c (cxx_init): Likewise.
++	* name-lookup.c (lookup_function_nonclass): Add extra argument
++	include_std.
++	(lookup_arg_dependent): Likewise.
++	* name-lookup.h: Likewise.
++
+ 2010-07-31  Release Manager
+ 
+ 	* GCC 4.5.1 released.
+diff --git a/gcc/cp/cp-tree.def b/gcc/cp/cp-tree.def
+index c71f94c..fd02701 100644
+--- a/gcc/cp/cp-tree.def
++++ b/gcc/cp/cp-tree.def
+@@ -292,6 +292,11 @@ DEFTREECODE (IF_STMT, "if_stmt", tcc_statement, 3)
+    FOR_INIT_STMT, FOR_COND, FOR_EXPR, and FOR_BODY, respectively.  */
+ DEFTREECODE (FOR_STMT, "for_stmt", tcc_statement, 4)
+ 
++/* Used to represent a range-based `for' statement. The operands are
++   RANGE_FOR_DECL, RANGE_FOR_EXPR, RANGE_FOR_BODY, respectively.  Only used
++   in templates.  */
++DEFTREECODE (RANGE_FOR_STMT, "range_for_stmt", tcc_statement, 3)
++
+ /* Used to represent a 'while' statement. The operands are WHILE_COND
+    and WHILE_BODY, respectively.  */
+ DEFTREECODE (WHILE_STMT, "while_stmt", tcc_statement, 2)
+diff --git a/gcc/cp/cp-tree.h b/gcc/cp/cp-tree.h
+index a6964ad..39837aa 100644
+--- a/gcc/cp/cp-tree.h
++++ b/gcc/cp/cp-tree.h
+@@ -3738,6 +3738,12 @@ more_aggr_init_expr_args_p (const aggr_init_expr_arg_iterator *iter)
+ #define FOR_EXPR(NODE)		TREE_OPERAND (FOR_STMT_CHECK (NODE), 2)
+ #define FOR_BODY(NODE)		TREE_OPERAND (FOR_STMT_CHECK (NODE), 3)
+ 
++/* RANGE_FOR_STMT accessors. These give access to the declarator,
++   expression and body of the statement, respectively.  */
++#define RANGE_FOR_DECL(NODE)	TREE_OPERAND (RANGE_FOR_STMT_CHECK (NODE), 0)
++#define RANGE_FOR_EXPR(NODE)	TREE_OPERAND (RANGE_FOR_STMT_CHECK (NODE), 1)
++#define RANGE_FOR_BODY(NODE)	TREE_OPERAND (RANGE_FOR_STMT_CHECK (NODE), 2)
++
+ #define SWITCH_STMT_COND(NODE)	TREE_OPERAND (SWITCH_STMT_CHECK (NODE), 0)
+ #define SWITCH_STMT_BODY(NODE)	TREE_OPERAND (SWITCH_STMT_CHECK (NODE), 1)
+ #define SWITCH_STMT_TYPE(NODE)	TREE_OPERAND (SWITCH_STMT_CHECK (NODE), 2)
+@@ -3948,6 +3954,7 @@ extern int function_depth;
+    sizeof can be nested.  */
+ 
+ extern int cp_unevaluated_operand;
++extern tree cp_convert_range_for (tree, tree, tree);
+ 
+ /* in pt.c  */
+ 
+@@ -5090,6 +5097,9 @@ extern void finish_for_init_stmt		(tree);
+ extern void finish_for_cond			(tree, tree);
+ extern void finish_for_expr			(tree, tree);
+ extern void finish_for_stmt			(tree);
++extern tree begin_range_for_stmt		(void);
++extern void finish_range_for_decl		(tree, tree, tree);
++extern void finish_range_for_stmt		(tree);
+ extern tree finish_break_stmt			(void);
+ extern tree finish_continue_stmt		(void);
+ extern tree begin_switch_stmt			(void);
+@@ -5130,7 +5140,7 @@ extern tree finish_stmt_expr_expr		(tree, tree);
+ extern tree finish_stmt_expr			(tree, bool);
+ extern tree stmt_expr_value_expr		(tree);
+ bool empty_expr_stmt_p				(tree);
+-extern tree perform_koenig_lookup		(tree, VEC(tree,gc) *);
++extern tree perform_koenig_lookup		(tree, VEC(tree,gc) *, bool);
+ extern tree finish_call_expr			(tree, VEC(tree,gc) **, bool,
+ 						 bool, tsubst_flags_t);
+ extern tree finish_increment_expr		(tree, enum tree_code);
+diff --git a/gcc/cp/cxx-pretty-print.c b/gcc/cp/cxx-pretty-print.c
+index d7194da..8c33920 100644
+--- a/gcc/cp/cxx-pretty-print.c
++++ b/gcc/cp/cxx-pretty-print.c
+@@ -1905,6 +1905,23 @@ pp_cxx_statement (cxx_pretty_printer *pp, tree t)
+       pp_needs_newline (pp) = true;
+       break;
+ 
++    case RANGE_FOR_STMT:
++      pp_cxx_ws_string (pp, "for");
++      pp_space (pp);
++      pp_cxx_left_paren (pp);
++      pp_cxx_statement (pp, RANGE_FOR_DECL (t));
++      pp_space (pp);
++      pp_needs_newline (pp) = false;
++      pp_colon (pp);
++      pp_space (pp);
++      pp_cxx_statement (pp, RANGE_FOR_EXPR (t));
++      pp_cxx_right_paren (pp);
++      pp_newline_and_indent (pp, 3);
++      pp_cxx_statement (pp, FOR_BODY (t));
++      pp_indentation (pp) -= 3;
++      pp_needs_newline (pp) = true;
++      break;
++
+       /* jump-statement:
+ 	    goto identifier;
+ 	    continue ;
+diff --git a/gcc/cp/dump.c b/gcc/cp/dump.c
+index 5ca10fc..1e698bc 100644
+--- a/gcc/cp/dump.c
++++ b/gcc/cp/dump.c
+@@ -453,6 +453,13 @@ cp_dump_tree (void* dump_info, tree t)
+       dump_child ("body", FOR_BODY (t));
+       break;
+ 
++    case RANGE_FOR_STMT:
++      dump_stmt (di, t);
++      dump_child ("decl", RANGE_FOR_DECL (t));
++      dump_child ("expr", RANGE_FOR_EXPR (t));
++      dump_child ("body", RANGE_FOR_BODY (t));
++      break;
++
+     case SWITCH_STMT:
+       dump_stmt (di, t);
+       dump_child ("cond", SWITCH_STMT_COND (t));
+diff --git a/gcc/cp/lex.c b/gcc/cp/lex.c
+index 041e391..69a67fd 100644
+--- a/gcc/cp/lex.c
++++ b/gcc/cp/lex.c
+@@ -226,8 +226,9 @@ cxx_init (void)
+    CTOR_INITIALIZER,	TRY_BLOCK,	HANDLER,
+    EH_SPEC_BLOCK,	USING_STMT,	TAG_DEFN,
+    IF_STMT,		CLEANUP_STMT,	FOR_STMT,
+-   WHILE_STMT,		DO_STMT,	BREAK_STMT,
+-   CONTINUE_STMT,	SWITCH_STMT,	EXPR_STMT
++   RANGE_FOR_STMT,	WHILE_STMT,	DO_STMT,
++   BREAK_STMT,		CONTINUE_STMT,	SWITCH_STMT,
++   EXPR_STMT
+   };
+ 
+   memset (&statement_code_p, 0, sizeof (statement_code_p));
+diff --git a/gcc/cp/name-lookup.c b/gcc/cp/name-lookup.c
+index b0ea1c8..45cb330 100644
+--- a/gcc/cp/name-lookup.c
++++ b/gcc/cp/name-lookup.c
+@@ -4328,7 +4328,7 @@ lookup_function_nonclass (tree name, VEC(tree,gc) *args, bool block_p)
+     lookup_arg_dependent (name,
+ 			  lookup_name_real (name, 0, 1, block_p, 0,
+ 					    LOOKUP_COMPLAIN),
+-			  args);
++			  args, false);
+ }
+ 
+ tree
+@@ -4988,7 +4988,8 @@ arg_assoc (struct arg_lookup *k, tree n)
+    are the functions found in normal lookup.  */
+ 
+ tree
+-lookup_arg_dependent (tree name, tree fns, VEC(tree,gc) *args)
++lookup_arg_dependent (tree name, tree fns, VEC(tree,gc) *args,
++		      bool include_std)
+ {
+   struct arg_lookup k;
+ 
+@@ -5011,6 +5012,8 @@ lookup_arg_dependent (tree name, tree fns, VEC(tree,gc) *args)
+      picking up later definitions) in the second stage. */
+   k.namespaces = NULL_TREE;
+ 
++  if (include_std)
++    arg_assoc_namespace (&k, std_node);
+   arg_assoc_args_vec (&k, args);
+ 
+   fns = k.functions;
+diff --git a/gcc/cp/name-lookup.h b/gcc/cp/name-lookup.h
+index 0851481..895b236 100644
+--- a/gcc/cp/name-lookup.h
++++ b/gcc/cp/name-lookup.h
+@@ -334,7 +334,7 @@ extern void do_toplevel_using_decl (tree, tree, tree);
+ extern void do_local_using_decl (tree, tree, tree);
+ extern tree do_class_using_decl (tree, tree);
+ extern void do_using_directive (tree);
+-extern tree lookup_arg_dependent (tree, tree, VEC(tree,gc) *);
++extern tree lookup_arg_dependent (tree, tree, VEC(tree,gc) *, bool);
+ extern bool is_associated_namespace (tree, tree);
+ extern void parse_using_directive (tree, tree);
+ extern tree innermost_non_namespace_value (tree);
+diff --git a/gcc/cp/parser.c b/gcc/cp/parser.c
+index 0b53400..703f61b 100644
+--- a/gcc/cp/parser.c
++++ b/gcc/cp/parser.c
+@@ -1662,6 +1662,10 @@ static tree cp_parser_iteration_statement
+   (cp_parser *);
+ static void cp_parser_for_init_statement
+   (cp_parser *);
++static tree  cp_parser_c_for
++  (cp_parser *);
++static tree  cp_parser_range_for
++  (cp_parser *);
+ static tree cp_parser_jump_statement
+   (cp_parser *);
+ static void cp_parser_declaration_statement
+@@ -4845,7 +4849,8 @@ cp_parser_postfix_expression (cp_parser *parser, bool address_p, bool cast_p,
+ 			koenig_p = true;
+ 			if (!any_type_dependent_arguments_p (args))
+ 			  postfix_expression
+-			    = perform_koenig_lookup (postfix_expression, args);
++			    = perform_koenig_lookup (postfix_expression, args,
++						     /*include_std=*/false);
+ 		      }
+ 		    else
+ 		      postfix_expression
+@@ -4869,7 +4874,8 @@ cp_parser_postfix_expression (cp_parser *parser, bool address_p, bool cast_p,
+ 			koenig_p = true;
+ 			if (!any_type_dependent_arguments_p (args))
+ 			  postfix_expression
+-			    = perform_koenig_lookup (postfix_expression, args);
++			    = perform_koenig_lookup (postfix_expression, args,
++						     /*include_std=*/false);
+ 		      }
+ 		  }
+ 	      }
+@@ -8206,6 +8212,259 @@ cp_parser_condition (cp_parser* parser)
+   return cp_parser_expression (parser, /*cast_p=*/false, NULL);
+ }
+ 
++/* Parses a traditional for-statement until the closing ')', not included. */
++
++static tree
++cp_parser_c_for (cp_parser *parser)
++{
++  /* Normal for loop */
++  tree stmt;
++  tree condition = NULL_TREE;
++  tree expression = NULL_TREE;
++
++  /* Begin the for-statement.  */
++  stmt = begin_for_stmt ();
++
++  /* Parse the initialization.  */
++  cp_parser_for_init_statement (parser);
++  finish_for_init_stmt (stmt);
++
++  /* If there's a condition, process it.  */
++  if (cp_lexer_next_token_is_not (parser->lexer, CPP_SEMICOLON))
++    condition = cp_parser_condition (parser);
++  finish_for_cond (condition, stmt);
++  /* Look for the `;'.  */
++  cp_parser_require (parser, CPP_SEMICOLON, "%<;%>");
++
++  /* If there's an expression, process it.  */
++  if (cp_lexer_next_token_is_not (parser->lexer, CPP_CLOSE_PAREN))
++    expression = cp_parser_expression (parser, /*cast_p=*/false, NULL);
++  finish_for_expr (expression, stmt);
++
++  return stmt;
++}
++
++/* Tries to parse a range-based for-statement:
++
++  range-based-for:
++    type-specifier-seq declarator : expression
++
++  If succesful, assigns to *DECL the DECLARATOR and to *EXPR the
++  expression. Note that the *DECL is returned unfinished, so
++  later you should call cp_finish_decl().
++
++  Returns TRUE iff a range-based for is parsed. */
++
++static tree
++cp_parser_range_for (cp_parser *parser)
++{
++  tree stmt, range_decl, range_expr;
++  cp_decl_specifier_seq type_specifiers;
++  cp_declarator *declarator;
++  const char *saved_message;
++  tree attributes, pushed_scope;
++
++  cp_parser_parse_tentatively (parser);
++  /* New types are not allowed in the type-specifier-seq for a
++     range-based for loop.  */
++  saved_message = parser->type_definition_forbidden_message;
++  parser->type_definition_forbidden_message
++    = G_("types may not be defined in range-based for loops");
++  /* Parse the type-specifier-seq.  */
++  cp_parser_type_specifier_seq (parser, /*is_declaration==*/true,
++				/*is_trailing_return=*/false,
++				&type_specifiers);
++  /* Restore the saved message.  */
++  parser->type_definition_forbidden_message = saved_message;
++  /* If all is well, we might be looking at a declaration.  */
++  if (cp_parser_error_occurred (parser))
++    {
++      cp_parser_abort_tentative_parse (parser);
++      return NULL_TREE;
++    }
++  /* Parse the declarator.  */
++  declarator = cp_parser_declarator (parser, CP_PARSER_DECLARATOR_NAMED,
++				     /*ctor_dtor_or_conv_p=*/NULL,
++				     /*parenthesized_p=*/NULL,
++				     /*member_p=*/false);
++  /* Parse the attributes.  */
++  attributes = cp_parser_attributes_opt (parser);
++  /* The next token should be `:'. */
++  if (cp_lexer_next_token_is_not (parser->lexer, CPP_COLON))
++    cp_parser_simulate_error (parser);
++
++  /* Check if it is a range-based for */
++  if (!cp_parser_parse_definitely (parser))
++    return NULL_TREE;
++
++  cp_parser_require (parser, CPP_COLON, "%<:%>");
++  if (cp_lexer_next_token_is (parser->lexer, CPP_OPEN_BRACE))
++    {
++      bool expr_non_constant_p;
++      range_expr = cp_parser_braced_list (parser, &expr_non_constant_p);
++    }
++  else
++    range_expr = cp_parser_expression (parser, /*cast_p=*/false, NULL);
++
++  /* If in template, STMT is converted to a normal for-statements
++     at instantiation. If not, it is done just ahead. */
++  if (processing_template_decl)
++    stmt = begin_range_for_stmt ();
++  else
++    stmt = begin_for_stmt ();
++
++  /* Create the declaration. It must be after begin{,_range}_for_stmt(). */
++  range_decl = start_decl (declarator, &type_specifiers,
++			   /*initialized_p=*/SD_INITIALIZED,
++			   attributes, /*prefix_attributes=*/NULL_TREE,
++			   &pushed_scope);
++  /* No scope allowed here */
++  if (pushed_scope) 
++    pop_scope (pushed_scope);
++
++  if (TREE_CODE (stmt) == RANGE_FOR_STMT)
++    finish_range_for_decl (stmt, range_decl, range_expr);
++  else
++    /* Convert the range-based for loop into a normal for-statement. */
++    stmt = cp_convert_range_for (stmt, range_decl, range_expr);
++
++  return stmt;
++}
++
++/* Converts a range-based for-statement into a normal
++   for-statement, as per the definition.
++
++      for (RANGE_DECL : RANGE_EXPR)
++	BLOCK
++
++   should be equivalent to:
++
++      {
++	auto &&__range = RANGE_EXPR;
++	for (auto __begin = BEGIN_EXPR, end = END_EXPR;
++	      __begin != __end;
++	      ++__begin)
++	  {
++	      RANGE_DECL = *__begin;
++	      BLOCK
++	  }
++      }
++
++   If RANGE_EXPR is an array:
++       BEGIN_EXPR = __range
++       END_EXPR = __range + ARRAY_SIZE(__range)
++   Else:
++	BEGIN_EXPR = begin(__range)
++	END_EXPR = end(__range);
++
++   When calling begin()/end() we must use argument dependent
++   lookup, but always considering 'std' as an associated namespace.  */
++
++tree
++cp_convert_range_for (tree statement, tree range_decl, tree range_expr)
++{
++  tree range_type, range_temp;
++  tree begin, end;
++  tree iter_type, begin_expr, end_expr;
++  tree condition, expression;
++
++  /* Find out the type deduced by the declaration
++   * `auto &&__range = range_expr' */
++  range_type = cp_build_reference_type (make_auto (), true);
++  range_type = do_auto_deduction (range_type, range_expr,
++				  type_uses_auto (range_type));
++
++  /* Create the __range variable */
++  range_temp = build_decl (input_location, VAR_DECL,
++			   get_identifier ("__for_range"), range_type);
++  TREE_USED (range_temp) = 1;
++  DECL_ARTIFICIAL (range_temp) = 1;
++  pushdecl (range_temp);
++  finish_expr_stmt (cp_build_modify_expr (range_temp, INIT_EXPR, range_expr,
++					  tf_warning_or_error));
++  range_temp = convert_from_reference (range_temp);
++
++  if (TREE_CODE (TREE_TYPE (range_temp)) == ARRAY_TYPE)
++    {
++      /* If RANGE_TEMP is an array we will use pointer arithmetic */
++      iter_type = build_pointer_type (TREE_TYPE (TREE_TYPE (range_temp)));
++      begin_expr = range_temp;
++      end_expr
++	= build_binary_op (input_location, PLUS_EXPR,
++			   range_temp,
++			   array_type_nelts_top (TREE_TYPE (range_temp)), 0);
++    }
++  else
++    {
++      /* If it is not an array, we must call begin(__range)/end__range() */
++      VEC(tree,gc) *vec;
++
++      begin_expr = get_identifier ("begin");
++      vec = make_tree_vector ();
++      VEC_safe_push (tree, gc, vec, range_temp);
++      begin_expr = perform_koenig_lookup (begin_expr, vec,
++					  /*include_std=*/true);
++      begin_expr = finish_call_expr (begin_expr, &vec, false, true,
++				     tf_warning_or_error);
++      release_tree_vector (vec);
++
++      end_expr = get_identifier ("end");
++      vec = make_tree_vector ();
++      VEC_safe_push (tree, gc, vec, range_temp);
++      end_expr = perform_koenig_lookup (end_expr, vec,
++					/*include_std=*/true);
++      end_expr = finish_call_expr (end_expr, &vec, false, true,
++				   tf_warning_or_error);
++      release_tree_vector (vec);
++
++      /* The unqualified type of the __begin and __end temporaries should
++      * be the same as required by the multiple auto declaration */
++      iter_type = cv_unqualified (TREE_TYPE (begin_expr));
++      if (!same_type_p (iter_type, cv_unqualified (TREE_TYPE (end_expr))))
++	error ("inconsistent begin/end types in range-based for: %qT and %qT",
++	       TREE_TYPE (begin_expr), TREE_TYPE (end_expr));
++    }
++
++  /* The new for initialization statement */
++  begin = build_decl (input_location, VAR_DECL,
++		      get_identifier ("__for_begin"), iter_type);
++  TREE_USED (begin) = 1;
++  DECL_ARTIFICIAL (begin) = 1;
++  pushdecl (begin);
++  finish_expr_stmt (cp_build_modify_expr (begin, INIT_EXPR, begin_expr,
++					  tf_warning_or_error));
++  end = build_decl (input_location, VAR_DECL,
++		    get_identifier ("__for_end"), iter_type);
++  TREE_USED (end) = 1;
++  DECL_ARTIFICIAL (end) = 1;
++  pushdecl (end);
++
++  finish_expr_stmt (cp_build_modify_expr (end, INIT_EXPR, end_expr,
++					  tf_warning_or_error));
++
++  finish_for_init_stmt (statement);
++
++/* The new for condition */
++  condition = build_x_binary_op (NE_EXPR,
++				 begin, ERROR_MARK,
++				 end, ERROR_MARK,
++				 NULL, tf_warning_or_error);
++  finish_for_cond (condition, statement);
++
++  /* The new increment expression */
++  expression = finish_unary_op_expr (PREINCREMENT_EXPR, begin);
++  finish_for_expr (expression, statement);
++
++  /* The declaration is initialized with *__begin inside the loop body */
++  cp_finish_decl (range_decl,
++		  build_x_indirect_ref (begin, RO_NULL, tf_warning_or_error),
++		  /*is_constant_init*/false, NULL_TREE,
++		  LOOKUP_ONLYCONVERTING);
++
++  return statement;
++}
++
++
+ /* Parse an iteration-statement.
+ 
+    iteration-statement:
+@@ -8214,7 +8473,7 @@ cp_parser_condition (cp_parser* parser)
+      for ( for-init-statement condition [opt] ; expression [opt] )
+        statement
+ 
+-   Returns the new WHILE_STMT, DO_STMT, or FOR_STMT.  */
++   Returns the new WHILE_STMT, DO_STMT, FOR_STMT or RANGE_FOR_STMT.  */
+ 
+ static tree
+ cp_parser_iteration_statement (cp_parser* parser)
+@@ -8287,28 +8546,16 @@ cp_parser_iteration_statement (cp_parser* parser)
+ 
+     case RID_FOR:
+       {
+-	tree condition = NULL_TREE;
+-	tree expression = NULL_TREE;
+-
+-	/* Begin the for-statement.  */
+-	statement = begin_for_stmt ();
+ 	/* Look for the `('.  */
+ 	cp_parser_require (parser, CPP_OPEN_PAREN, "%<(%>");
+-	/* Parse the initialization.  */
+-	cp_parser_for_init_statement (parser);
+-	finish_for_init_stmt (statement);
+-
+-	/* If there's a condition, process it.  */
+-	if (cp_lexer_next_token_is_not (parser->lexer, CPP_SEMICOLON))
+-	  condition = cp_parser_condition (parser);
+-	finish_for_cond (condition, statement);
+-	/* Look for the `;'.  */
+-	cp_parser_require (parser, CPP_SEMICOLON, "%<;%>");
+ 
+-	/* If there's an expression, process it.  */
+-	if (cp_lexer_next_token_is_not (parser->lexer, CPP_CLOSE_PAREN))
+-	  expression = cp_parser_expression (parser, /*cast_p=*/false, NULL);
+-	finish_for_expr (expression, statement);
++	if (cxx_dialect == cxx0x)
++	  statement = cp_parser_range_for (parser);
++	else
++	  statement = NULL_TREE;
++	if (statement == NULL_TREE)
++	  statement = cp_parser_c_for (parser);
++
+ 	/* Look for the `)'.  */
+ 	cp_parser_require (parser, CPP_CLOSE_PAREN, "%<)%>");
+ 
+diff --git a/gcc/cp/pt.c b/gcc/cp/pt.c
+index c979776..2bc45c5 100644
+--- a/gcc/cp/pt.c
++++ b/gcc/cp/pt.c
+@@ -11685,7 +11685,7 @@ tsubst_expr (tree t, tree args, tsubst_flags_t complain, tree in_decl,
+ 
+     case FOR_STMT:
+       stmt = begin_for_stmt ();
+-			  RECUR (FOR_INIT_STMT (t));
++      RECUR (FOR_INIT_STMT (t));
+       finish_for_init_stmt (stmt);
+       tmp = RECUR (FOR_COND (t));
+       finish_for_cond (tmp, stmt);
+@@ -11695,6 +11695,20 @@ tsubst_expr (tree t, tree args, tsubst_flags_t complain, tree in_decl,
+       finish_for_stmt (stmt);
+       break;
+ 
++    case RANGE_FOR_STMT:
++      {
++        tree decl, expr;
++        stmt = begin_for_stmt ();
++        decl = RANGE_FOR_DECL (t);
++        decl = tsubst (decl, args, complain, in_decl);
++        maybe_push_decl (decl);
++        expr = RECUR (RANGE_FOR_EXPR (t));
++        stmt = cp_convert_range_for (stmt, decl, expr);
++        RECUR (RANGE_FOR_BODY (t));
++        finish_for_stmt (stmt);
++      }
++      break;
++
+     case WHILE_STMT:
+       stmt = begin_while_stmt ();
+       tmp = RECUR (WHILE_COND (t));
+@@ -12468,7 +12482,7 @@ tsubst_copy_and_build (tree t,
+ 	       into a non-dependent call.  */
+ 	    && type_dependent_expression_p_push (t)
+ 	    && !any_type_dependent_arguments_p (call_args))
+-	  function = perform_koenig_lookup (function, call_args);
++	  function = perform_koenig_lookup (function, call_args, false);
+ 
+ 	if (TREE_CODE (function) == IDENTIFIER_NODE)
+ 	  {
+diff --git a/gcc/cp/semantics.c b/gcc/cp/semantics.c
+index 844fcf4..e30ff78 100644
+--- a/gcc/cp/semantics.c
++++ b/gcc/cp/semantics.c
+@@ -885,15 +885,27 @@ finish_for_expr (tree expr, tree for_stmt)
+ 
+ /* Finish the body of a for-statement, which may be given by
+    FOR_STMT.  The increment-EXPR for the loop must be
+-   provided.  */
++   provided.
++   It can also finish RANGE_FOR_STMT. */
+ 
+ void
+ finish_for_stmt (tree for_stmt)
+ {
+-  FOR_BODY (for_stmt) = do_poplevel (FOR_BODY (for_stmt));
++  bool scoped;
++
++  if (TREE_CODE (for_stmt) == RANGE_FOR_STMT)
++    {
++      RANGE_FOR_BODY (for_stmt) = do_poplevel (RANGE_FOR_BODY (for_stmt));
++      scoped = true;
++    }
++  else
++    {
++      FOR_BODY (for_stmt) = do_poplevel (FOR_BODY (for_stmt));
++      scoped = flag_new_for_scope > 0;
++    }
+ 
+   /* Pop the scope for the body of the loop.  */
+-  if (flag_new_for_scope > 0)
++  if (scoped)
+     {
+       tree scope = TREE_CHAIN (for_stmt);
+       TREE_CHAIN (for_stmt) = NULL;
+@@ -903,6 +915,34 @@ finish_for_stmt (tree for_stmt)
+   finish_stmt ();
+ }
+ 
++/* Begin a range-for-statement.  Returns a new RANGE_FOR_STMT.
++   To finish it call finish_for_stmt(). */
++
++tree
++begin_range_for_stmt (void)
++{
++  tree r;
++  r = build_stmt (input_location, RANGE_FOR_STMT,
++		  NULL_TREE, NULL_TREE, NULL_TREE);
++  /* We can ignore flag_new_for_scope here. */
++  TREE_CHAIN (r) = do_pushlevel (sk_for);
++
++  return r;
++}
++
++/* Finish the head of a range-based for statement, which may
++   be given by RANGE_FOR_STMT. DECL must be the declaration
++   and EXPR must be the loop expression. */
++
++void
++finish_range_for_decl (tree range_for_stmt, tree decl, tree expr)
++{
++  RANGE_FOR_DECL (range_for_stmt) = decl;
++  RANGE_FOR_EXPR (range_for_stmt) = expr;
++  add_stmt (range_for_stmt);
++  RANGE_FOR_BODY (range_for_stmt) = do_pushlevel (sk_block);
++}
++
+ /* Finish a break-statement.  */
+ 
+ tree
+@@ -1876,11 +1916,12 @@ empty_expr_stmt_p (tree expr_stmt)
+ 
+ /* Perform Koenig lookup.  FN is the postfix-expression representing
+    the function (or functions) to call; ARGS are the arguments to the
+-   call.  Returns the functions to be considered by overload
+-   resolution.  */
++   call; if INCLUDE_STD then the `std' namespace is automatically
++   considered an associated namespace (used in range-based for loops).
++   Returns the functions to be considered by overload resolution.  */
+ 
+ tree
+-perform_koenig_lookup (tree fn, VEC(tree,gc) *args)
++perform_koenig_lookup (tree fn, VEC(tree,gc) *args, bool include_std)
+ {
+   tree identifier = NULL_TREE;
+   tree functions = NULL_TREE;
+@@ -1916,7 +1957,7 @@ perform_koenig_lookup (tree fn, VEC(tree,gc) *args)
+   if (!any_type_dependent_arguments_p (args)
+       && !any_dependent_template_arguments_p (tmpl_args))
+     {
+-      fn = lookup_arg_dependent (identifier, functions, args);
++      fn = lookup_arg_dependent (identifier, functions, args, include_std);
+       if (!fn)
+ 	/* The unqualified name could not be resolved.  */
+ 	fn = unqualified_fn_lookup_error (identifier);
+diff --git a/gcc/testsuite/ChangeLog b/gcc/testsuite/ChangeLog
+index 25d9c04..de56b58 100644
+--- a/gcc/testsuite/ChangeLog
++++ b/gcc/testsuite/ChangeLog
+@@ -1,3 +1,12 @@
++2010-09-11  Rodrigo Rivas <rodrigorivascosta@gmail.com>
++
++	* g++.dg/cpp0x/range-for1.C: New.
++	* g++.dg/cpp0x/range-for2.C: New.
++	* g++.dg/cpp0x/range-for3.C: New.
++	* g++.dg/cpp0x/range-for4.C: New.
++	* g++.dg/cpp0x/range-for5.C: New.
++	* g++.dg/cpp0x/range-for6.C: New.
++
+ 2010-07-31  Release Manager
+ 
+ 	* GCC 4.5.1 released.
+diff --git a/gcc/testsuite/g++.dg/cpp0x/range-for1.C b/gcc/testsuite/g++.dg/cpp0x/range-for1.C
+new file mode 100644
+index 0000000..49e2ecd
+--- /dev/null
++++ b/gcc/testsuite/g++.dg/cpp0x/range-for1.C
+@@ -0,0 +1,17 @@
++// Test for range-based for loop
++// Test the loop with an array
++
++// { dg-do run }
++// { dg-options "-std=c++0x" }
++
++extern "C" void abort();
++
++int main()
++{
++    int a[] = {1,2,3,4};
++    int sum = 0;
++    for (int x : a)
++        sum += x;
++    if (sum != 10)
++        abort();
++}
+diff --git a/gcc/testsuite/g++.dg/cpp0x/range-for2.C b/gcc/testsuite/g++.dg/cpp0x/range-for2.C
+new file mode 100644
+index 0000000..bfab376
+--- /dev/null
++++ b/gcc/testsuite/g++.dg/cpp0x/range-for2.C
+@@ -0,0 +1,41 @@
++// Test for range-based for loop
++// Test the loop with a custom iterator
++// with begin/end in an associated namespace
++
++// { dg-do compile }
++// { dg-options "-std=c++0x" }
++
++struct iterator
++{
++    int x;
++    iterator(int v) :x(v) {}
++    iterator &operator ++() { ++x; return *this; }
++    int operator *() { return x; }
++    bool operator != (const iterator &o) { return x != o.x; }
++};
++
++namespace foo
++{
++    struct container
++    {
++        int min, max;
++        container(int a, int b) :min(a), max(b) {}
++    };
++
++    iterator begin(container &c)
++    {
++        return iterator(c.min);
++    }
++
++    iterator end(container &c)
++    {
++        return iterator(c.max + 1);
++    }
++}
++
++int main()
++{
++    foo::container c(1,4);
++    for (iterator it : c)
++        ;
++}
+diff --git a/gcc/testsuite/g++.dg/cpp0x/range-for3.C b/gcc/testsuite/g++.dg/cpp0x/range-for3.C
+new file mode 100644
+index 0000000..947f01c
+--- /dev/null
++++ b/gcc/testsuite/g++.dg/cpp0x/range-for3.C
+@@ -0,0 +1,42 @@
++// Test for range-based for loop
++// Test the loop with a custom iterator
++// with begin/end in std
++
++// { dg-do compile }
++// { dg-options "-std=c++0x" }
++
++struct iterator
++{
++    int x;
++    iterator(int v) :x(v) {}
++    iterator &operator ++() { ++x; return *this; }
++    int operator *() { return x; }
++    bool operator != (const iterator &o) { return x != o.x; }
++};
++
++struct container
++{
++    int min, max;
++    container(int a, int b) :min(a), max(b) {}
++};
++
++namespace std
++{
++    iterator begin(container &c)
++    {
++        return iterator(c.min);
++    }
++
++    iterator end(container &c)
++    {
++        return iterator(c.max + 1);
++    }
++}
++
++int main()
++{
++    container c(1,4);
++    for (iterator it : c)
++    {
++    }
++}
+diff --git a/gcc/testsuite/g++.dg/cpp0x/range-for4.C b/gcc/testsuite/g++.dg/cpp0x/range-for4.C
+new file mode 100644
+index 0000000..96c0d90
+--- /dev/null
++++ b/gcc/testsuite/g++.dg/cpp0x/range-for4.C
+@@ -0,0 +1,119 @@
++// Test for range-based for loop with templates
++
++// { dg-do run }
++// { dg-options "-std=c++0x" }
++
++#include <cstdio>
++
++/* Preliminary declarations */
++namespace pre
++{
++  struct iterator
++  {
++    int x;
++    iterator (int v) :x(v) {}
++    iterator &operator ++() { ++x; return *this; }
++    int operator *() { return x; }
++    bool operator != (const iterator &o) { return x != o.x; }
++  };
++
++  struct container
++  {
++    int min, max;
++    container(int a, int b) :min(a), max(b) {}
++  };
++
++  iterator begin(const container &c)
++  {
++    return iterator(c.min);
++  }
++
++  iterator end(const container &c)
++  {
++    return iterator(c.max);
++  }
++
++} //namespace pre
++
++using pre::container;
++extern "C" void abort(void);
++
++container run_me_just_once()
++{
++    static bool run = false;
++    if (run)
++        abort();
++    run = true;
++    return container(1,2);
++}
++
++/* Template with dependent expression. */
++/* Template with dependent expression. */
++template<typename T> int test1(const T &r)
++{
++  int t = 0;
++  for (int i : r)
++    t += i;
++  return t;
++}
++
++/* Template with non-dependent expression and dependent declaration. */
++template<typename T> int test2(const container &r)
++{
++  int t = 0;
++  for (T i : r)
++    t += i;
++  return t;
++}
++
++/* Template with non-dependent expression (array) and dependent declaration. */
++template<typename T> int test2(const int (&r)[4])
++{
++  int t = 0;
++  for (T i : r)
++    t += i;
++  return t;
++}
++
++/* Template with non-dependent expression and auto declaration. */
++template<typename T> int test3(const container &r)
++{
++  int t = 0;
++  for (auto i : r)
++    t += i;
++  return t;
++}
++
++/* Template with non-dependent expression (array) and auto declaration. */
++template<typename T> int test3(const int (&r)[4])
++{
++  int t = 0;
++  for (auto i : r)
++    t += i;
++  return t;
++}
++
++int main ()
++{
++  container c(1,5);
++  int a[4] = {5,6,7,8};
++
++  for (auto x : run_me_just_once())
++      ;
++
++  if (test1 (c) != 10)
++    abort();
++  if (test1 (a) != 26)
++    abort();
++
++  if (test2<int> (c) != 10)
++    abort();
++  if (test2<int> (a) != 26)
++    abort();
++
++  if (test3<int> (c) != 10)
++    abort();
++  if (test3<int> (a) != 26)
++    abort();
++  return 0;
++}
+diff --git a/gcc/testsuite/g++.dg/cpp0x/range-for5.C b/gcc/testsuite/g++.dg/cpp0x/range-for5.C
+new file mode 100644
+index 0000000..9c97ad5
+--- /dev/null
++++ b/gcc/testsuite/g++.dg/cpp0x/range-for5.C
+@@ -0,0 +1,54 @@
++// Test for errors in range-based for loops
++
++// { dg-do compile }
++// { dg-options "-std=c++0x" }
++
++struct container
++{
++};
++
++int *begin(const container &c)
++{
++  return 0;
++}
++
++int end(const container &c) //Ops! wrong type
++{
++  return 0;
++}
++
++
++struct Implicit
++{
++  Implicit(int x)
++  {}
++};
++struct Explicit
++{
++  explicit Explicit(int x)
++  {}
++};
++
++void test1()
++{
++  container c;
++  for (int x : c) // { dg-error "inconsistent|conversion" }
++    ;
++
++  int a[2] = {1,2};
++  for (Implicit x : a)
++    ;
++  for (Explicit x : a) // { dg-error "conversion" }
++    ;
++  for (const Implicit &x : a)
++    ;
++  for (Implicit &&x : a)
++    ;
++
++  //Check the correct scopes
++  int i;
++  for (int i : a)
++  {
++    int i;
++  }
++}
+diff --git a/gcc/testsuite/g++.dg/cpp0x/range-for6.C b/gcc/testsuite/g++.dg/cpp0x/range-for6.C
+new file mode 100644
+index 0000000..775507f
+--- /dev/null
++++ b/gcc/testsuite/g++.dg/cpp0x/range-for6.C
+@@ -0,0 +1,29 @@
++// Test for range-based for loop
++// Test the loop with an initializer_list
++
++// { dg-do run }
++// { dg-options "-std=c++0x" }
++
++#include <initializer_list>
++
++extern "C" void abort();
++
++template<typename T> T foo()
++{
++    T sum = 0;
++    for (T x : {T(1),T(2),T(3),T(4)})
++        sum += x;
++    if (sum != T(10))
++        abort();
++}
++
++int main()
++{
++    int sum = 0;
++    for (int x : {1,2,3,4})
++        sum += x;
++    if (sum != 10)
++        abort();
++
++    foo<int>();
++}
+diff --git a/libstdc++-v3/include/bits/stl_iterator.h b/libstdc++-v3/include/bits/stl_iterator.h
+index 105469a..490592d 100644
+--- a/libstdc++-v3/include/bits/stl_iterator.h
++++ b/libstdc++-v3/include/bits/stl_iterator.h
+@@ -67,6 +67,15 @@
+ 
+ _GLIBCXX_BEGIN_NAMESPACE(std)
+ 
++#ifdef __GXX_EXPERIMENTAL_CXX0X__
++  template <class C> inline auto begin(C& c) -> decltype(c.begin()) { return c.begin(); }
++  template <class C> inline auto begin(const C& c) -> decltype(c.begin()) { return c.begin(); }
++  template <class C> inline auto end(C& c) -> decltype(c.end()) { return c.end(); }
++  template <class C> inline auto end(const C& c) -> decltype(c.end()) { return c.end(); }
++  template <class T, size_t N> inline T* begin(T (&array)[N]) { return &array[0]; }
++  template <class T, size_t N> inline T* end(T (&array)[N]) { return &array[N]; }
++#endif
++
+   /**
+    * @addtogroup iterators
+    * @{
